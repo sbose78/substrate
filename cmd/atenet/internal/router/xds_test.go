@@ -1765,9 +1765,10 @@ func TestXdsServer_UpdateSnapshot_DownstreamClientAuth(t *testing.T) {
 }
 
 // TestXdsServer_UpdateSnapshot_IngressTokenAuth checks that token
-// authentication only makes the client certificate optional: the CA and SAN
-// checks stay, and ext_proc gets the verified SAN and the CONNECT token. With
-// it off, the listeners keep requiring a certificate and send neither.
+// authentication makes the client certificate optional, keeps the CA check,
+// drops the SAN matchers, and gives ext_proc the verified SAN and the CONNECT
+// token. With it off, the listeners keep requiring a certificate with an
+// allowed SAN and send neither.
 func TestXdsServer_UpdateSnapshot_IngressTokenAuth(t *testing.T) {
 	tokenAttributes := []string{extproc.IngressPeerFilterStateAttribute, extproc.IngressAuthorizationFilterStateAttribute}
 	for _, tc := range []struct {
@@ -1801,8 +1802,15 @@ func TestXdsServer_UpdateSnapshot_IngressTokenAuth(t *testing.T) {
 				if got := combined.GetValidationContextSdsSecretConfig().GetName(); got != IngressClientTrustSecretName {
 					t.Errorf("Listener '%s': validation SDS secret = '%s', want '%s'", name, got, IngressClientTrustSecretName)
 				}
-				if got := len(combined.GetDefaultValidationContext().GetMatchTypedSubjectAltNames()); got != len(tc.allowed) {
-					t.Errorf("Listener '%s': %d SAN matchers, want %d", name, got, len(tc.allowed))
+				// Envoy refuses a client without a certificate whenever any SAN
+				// matcher is set, so token authentication checks the SAN in
+				// ext_proc instead.
+				wantMatchers := len(tc.allowed)
+				if tc.tokenAuth {
+					wantMatchers = 0
+				}
+				if got := len(combined.GetDefaultValidationContext().GetMatchTypedSubjectAltNames()); got != wantMatchers {
+					t.Errorf("Listener '%s': %d SAN matchers, want %d", name, got, wantMatchers)
 				}
 			}
 

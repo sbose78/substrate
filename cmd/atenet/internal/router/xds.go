@@ -397,10 +397,12 @@ func (x *XdsServer) SetDownstreamClientAuth(caPath string, allowedSPIFFEIDs []st
 }
 
 // SetIngressTokenAuth makes the client certificate optional on the TLS ingress
-// listeners. Envoy still verifies a certificate the client presents, as
-// SetDownstreamClientAuth describes. The listeners record the verified URI SAN
-// and, on CONNECT, the outer request's Authorization header in filter state,
-// so ext_proc can require a bearer token from a client without a certificate.
+// listeners. Envoy still checks that a certificate the client presents chains
+// to the client CA, but drops the SAN matchers: its default validator refuses
+// a client without a certificate whenever any are set. The listeners record
+// the verified URI SAN and, on CONNECT, the outer request's Authorization
+// header in filter state. ext_proc then checks the SAN against the allowlist
+// and requires a bearer token from any other client.
 func (x *XdsServer) SetIngressTokenAuth(enabled bool) {
 	x.mu.Lock()
 	defer x.mu.Unlock()
@@ -535,8 +537,8 @@ func (x *XdsServer) UpdateSnapshot() error {
 
 	// Without an allowlist or token authentication no client may reach
 	// actors, so the TLS listeners are not served. Envoy skips the SAN check
-	// when there are no matchers, so with token authentication ext_proc
-	// checks the SAN against the allowlist again.
+	// when there are no matchers. With token authentication ext_proc checks
+	// the SAN instead.
 	clientsAllowed := len(x.downstreamAllowedSPIFFEIDs) > 0 || x.tokenAuth
 	httpsEnabled := x.httpsPort > 0 && x.certPath != "" && clientsAllowed
 	// The main_internal cluster and listener only exist to serve the CONNECT
@@ -1550,20 +1552,23 @@ func dualStackAdditionalAddresses(port int) []*listenerv3.AdditionalAddress {
 //
 // The socket requires a client certificate that chains to the CA bundle and
 // carries one of the allowed SPIFFE IDs (see SetDownstreamClientAuth). With
-// token authentication the certificate is optional, and Envoy applies the same
-// checks to one the client presents. As on
+// token authentication the certificate is optional and the socket checks only
+// the CA; see SetIngressTokenAuth. As on
 // the upstream side, the CA bundle arrives over SDS so it tracks
 // ClusterTrustBundle rotation, while the SPIFFE ID matchers stay inline in
 // the default context.
 func (x *XdsServer) buildDownstreamTlsTransportSocket(alpnProtocols []string) *corev3.TransportSocket {
-	sanMatchers := make([]*tlsv3.SubjectAltNameMatcher, 0, len(x.downstreamAllowedSPIFFEIDs))
-	for _, id := range x.downstreamAllowedSPIFFEIDs {
-		sanMatchers = append(sanMatchers, &tlsv3.SubjectAltNameMatcher{
-			SanType: tlsv3.SubjectAltNameMatcher_URI,
-			Matcher: &matcherv3.StringMatcher{
-				MatchPattern: &matcherv3.StringMatcher_Exact{Exact: id},
-			},
-		})
+	var sanMatchers []*tlsv3.SubjectAltNameMatcher
+	if !x.tokenAuth {
+		sanMatchers = make([]*tlsv3.SubjectAltNameMatcher, 0, len(x.downstreamAllowedSPIFFEIDs))
+		for _, id := range x.downstreamAllowedSPIFFEIDs {
+			sanMatchers = append(sanMatchers, &tlsv3.SubjectAltNameMatcher{
+				SanType: tlsv3.SubjectAltNameMatcher_URI,
+				Matcher: &matcherv3.StringMatcher{
+					MatchPattern: &matcherv3.StringMatcher_Exact{Exact: id},
+				},
+			})
+		}
 	}
 	tlsConfig := &tlsv3.DownstreamTlsContext{
 		RequireClientCertificate: wrapperspb.Bool(!x.tokenAuth),

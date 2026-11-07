@@ -66,9 +66,10 @@ func (m Mode) ServesEgress() bool { return m == ModeEgress }
 
 // ingressAuthConfig holds the client authentication settings for the ingress
 // dataplane's listeners. A client certificate must chain to ClientCAFile and
-// carry one of AllowedSPIFFEIDs as a URI SAN. Envoy enforces both during the
-// TLS handshake. Without AuthenticationConfigFile every client must present
-// one.
+// carry one of AllowedSPIFFEIDs as a URI SAN. Without AuthenticationConfigFile
+// every client must present one, and Envoy checks both during the TLS
+// handshake. With it, Envoy checks only the CA, and ext_proc checks the SAN
+// and requires a bearer token from any client without an allowed one.
 type ingressAuthConfig struct {
 	// ClientCAFile is the PEM bundle of CAs allowed to sign client
 	// certificates. Envoy reads it, so it must be mounted in the Envoy
