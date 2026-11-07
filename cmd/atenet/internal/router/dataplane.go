@@ -109,9 +109,17 @@ func (s *RouterServer) newEnvoyXdsServer(ctx context.Context, parkCfg ingress.Pa
 		return nil, fmt.Errorf("loading --ingress-client-ca-file: %w", err)
 	}
 	xdsSrv.SetDownstreamClientAuth(s.cfg.IngressAuth.ClientCAFile, s.cfg.IngressAuth.AllowedSPIFFEIDs)
-	if len(s.cfg.IngressAuth.AllowedSPIFFEIDs) == 0 {
+	tokenAuth := s.cfg.IngressAuth.AuthenticationConfigFile != ""
+	xdsSrv.SetIngressTokenAuth(tokenAuth)
+	switch {
+	case tokenAuth:
+		slog.InfoContext(ctx, "TLS ingress listeners accept client certificates or bearer tokens",
+			slog.String("client_ca_file", s.cfg.IngressAuth.ClientCAFile),
+			slog.Any("allowed_spiffe_ids", s.cfg.IngressAuth.AllowedSPIFFEIDs),
+			slog.String("authentication_config", s.cfg.IngressAuth.AuthenticationConfigFile))
+	case len(s.cfg.IngressAuth.AllowedSPIFFEIDs) == 0:
 		slog.InfoContext(ctx, "No --ingress-allowed-spiffe-ids, so the router serves no traffic")
-	} else {
+	default:
 		slog.InfoContext(ctx, "TLS ingress listeners require client certificates",
 			slog.String("client_ca_file", s.cfg.IngressAuth.ClientCAFile),
 			slog.Any("allowed_spiffe_ids", s.cfg.IngressAuth.AllowedSPIFFEIDs))

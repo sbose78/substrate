@@ -28,6 +28,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,6 +37,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	"k8s.io/client-go/kubernetes/fake"
 )
@@ -110,6 +112,57 @@ func TestDialOptionsMTLSHandshake(t *testing.T) {
 			t.Fatalf("health check code = %v, want handshake failure", code)
 		}
 	})
+}
+
+// TestDialOptionsWithoutClientCert checks that WithoutClientCert verifies the
+// server but presents no certificate, so the server authenticates the bearer
+// token instead.
+func TestDialOptionsWithoutClientCert(t *testing.T) {
+	ca := newTestCA(t)
+	dir := t.TempDir()
+	caFile := filepath.Join(dir, "ca.pem")
+	writeFile(t, caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.certDER}))
+
+	caPool := x509.NewCertPool()
+	caPool.AddCert(ca.cert)
+	var peerCerts atomic.Int32
+	peerCerts.Store(-1)
+	srv := grpc.NewServer(
+		grpc.Creds(credentials.NewTLS(&tls.Config{
+			Certificates: []tls.Certificate{ca.issueServerCert(t)},
+			ClientAuth:   tls.VerifyClientCertIfGiven,
+			ClientCAs:    caPool,
+			MinVersion:   tls.VersionTLS13,
+		})),
+		grpc.UnaryInterceptor(func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+			p, _ := peer.FromContext(ctx)
+			peerCerts.Store(int32(len(p.AuthInfo.(credentials.TLSInfo).State.PeerCertificates)))
+			return handler(ctx, req)
+		}),
+	)
+	healthpb.RegisterHealthServer(srv, health.NewServer())
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go srv.Serve(lis)
+	defer srv.Stop()
+
+	if _, err := DialOptions(ClientConfig{CAFile: caFile, ClientCredBundle: "bundle.pem", WithoutClientCert: true}); err == nil {
+		t.Fatalf("DialOptions() with both a bundle and WithoutClientCert succeeded, want error")
+	}
+	opts, err := DialOptions(ClientConfig{CAFile: caFile, WithoutClientCert: true})
+	if err != nil {
+		t.Fatalf("DialOptions() error = %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if code := healthCheckCode(ctx, t, lis.Addr().String(), opts); code != codes.OK {
+		t.Fatalf("health check code = %v, want %v", code, codes.OK)
+	}
+	if got := peerCerts.Load(); got != 0 {
+		t.Errorf("server saw %d client certificates, want 0", got)
+	}
 }
 
 // TestDialOptionsReloadsCAFile verifies that a rotation of the CA file on
