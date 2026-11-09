@@ -40,14 +40,9 @@ func (s *RouterServer) newIngressTokenAuth(ctx context.Context) (*ingress.TokenA
 	if err != nil {
 		return nil, fmt.Errorf("--ingress-authentication-config: %w", err)
 	}
-	var verifiers []*oidcjwt.Verifier
-	for _, p := range authCfg.JWTProviders {
-		httpClient, err := oidcjwt.NewHTTPClient(p.Issuer, p.CertificateAuthorityFile, p.DiscoveryTokenFile)
-		if err != nil {
-			return nil, fmt.Errorf("initialize JWT provider %q: %w", p.Name, err)
-		}
-		verifiers = append(verifiers, oidcjwt.NewVerifier(p.Issuer, p.Audiences, oidcjwt.HTTPKeySource(p.Issuer, httpClient)))
-		slog.InfoContext(ctx, "Configured ingress JWT provider", slog.String("name", p.Name), slog.String("issuer", p.Issuer))
+	verifiers, err := ingressVerifiers(ctx, authCfg)
+	if err != nil {
+		return nil, err
 	}
 
 	dialOpts, err := ateapiauth.DialOptions(ateapiauth.ClientConfig{
@@ -70,6 +65,22 @@ func (s *RouterServer) newIngressTokenAuth(ctx context.Context) (*ingress.TokenA
 		Verify:           verifyToken(verifiers),
 		Client:           ateapi.NewControlClient(conn),
 	}, nil
+}
+
+// ingressVerifiers builds a verifier for each JWT provider in cfg, as
+// ate-api-server's buildJWTProviders does.
+func ingressVerifiers(ctx context.Context, cfg *apiconfig.AuthenticationConfig) ([]*oidcjwt.Verifier, error) {
+	var verifiers []*oidcjwt.Verifier
+	for _, p := range cfg.JWTProviders {
+		httpClient, err := oidcjwt.NewHTTPClient(p.Issuer, p.CertificateAuthorityFile, p.DiscoveryTokenFile)
+		if err != nil {
+			return nil, fmt.Errorf("initialize JWT provider %q: %w", p.Name, err)
+		}
+		verifiers = append(verifiers, oidcjwt.NewVerifier(p.Issuer, p.Audiences, oidcjwt.HTTPKeySource(p.Issuer, httpClient),
+			oidcjwt.WithRequiredClaims(p.RequiredClaims())))
+		slog.InfoContext(ctx, "Configured ingress JWT provider", slog.String("name", p.Name), slog.String("issuer", p.Issuer))
+	}
+	return verifiers, nil
 }
 
 // verifyToken returns the subject of a token one of verifiers accepts. Each

@@ -22,9 +22,15 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"go.ate.dev/substrate/internal/apiconfig"
 	"go.ate.dev/substrate/internal/oidcjwt"
 )
 
@@ -104,6 +110,73 @@ func TestVerifyToken(t *testing.T) {
 			}
 			if subject != "alice" {
 				t.Errorf("subject = %q, want alice", subject)
+			}
+		})
+	}
+}
+
+// TestIngressVerifiersClaimValidationRules checks that the ingress applies a
+// provider's claim validation rules from --ingress-authentication-config.
+func TestIngressVerifiersClaimValidationRules(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var issuer string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"issuer": issuer, "jwks_uri": issuer + "/jwks"})
+	})
+	mux.HandleFunc("/jwks", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]string{{
+			"kty": "EC",
+			"crv": "P-256",
+			"kid": "a",
+			"x":   base64.RawURLEncoding.EncodeToString(key.X.FillBytes(make([]byte, 32))),
+			"y":   base64.RawURLEncoding.EncodeToString(key.Y.FillBytes(make([]byte, 32))),
+		}}})
+	})
+	srv := httptest.NewTLSServer(mux)
+	t.Cleanup(srv.Close)
+	issuer = srv.URL
+	caFile := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := apiconfig.ParseAuthenticationConfig([]byte("jwtProviders:\n- name: test\n  issuer: " + issuer +
+		"\n  audiences: [ate-api]\n  certificateAuthorityFile: " + caFile +
+		"\n  claimValidationRules:\n  - {claim: azp, requiredValue: cli}\n  - {claim: tenant, requiredValue: acme}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifiers, err := ingressVerifiers(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verify := verifyToken(verifiers)
+	now := time.Now()
+
+	for _, tc := range []struct {
+		name        string
+		azp, tenant string
+		wantErr     bool
+	}{
+		{name: "both claims match", azp: "cli", tenant: "acme"},
+		{name: "azp differs", azp: "web", tenant: "acme", wantErr: true},
+		{name: "tenant differs", azp: "cli", tenant: "other", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			token := signES256(t, key, "a", map[string]any{"iss": issuer, "aud": "ate-api", "sub": "alice",
+				"azp": tc.azp, "tenant": tc.tenant, "iat": now.Add(-time.Minute).Unix(), "exp": now.Add(time.Hour).Unix()})
+			subject, err := verify(context.Background(), token)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("verify accepted the token as %q, want an error", subject)
+				}
+				return
+			}
+			if err != nil || subject != "alice" {
+				t.Fatalf("verify = %q, %v, want alice", subject, err)
 			}
 		})
 	}
