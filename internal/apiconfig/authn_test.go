@@ -40,6 +40,24 @@ jwtProviders:
 		}
 	})
 
+	t.Run("claim validation rules", func(t *testing.T) {
+		cfg, err := ParseAuthenticationConfig([]byte(`
+jwtProviders:
+- name: example
+  issuer: https://auth.example.com/
+  audiences: [https://api.example.com]
+  claimValidationRules:
+  - claim: azp
+    requiredValue: cli-client
+`))
+		if err != nil {
+			t.Fatalf("ParseAuthenticationConfig() error = %v", err)
+		}
+		if got := cfg.JWTProviders[0].RequiredClaims(); len(got) != 1 || got["azp"] != "cli-client" {
+			t.Fatalf("RequiredClaims() = %v, want map[azp:cli-client]", got)
+		}
+	})
+
 	t.Run("unknown field", func(t *testing.T) {
 		_, err := ParseAuthenticationConfig([]byte(`
 jwtProviders:
@@ -125,6 +143,15 @@ func TestValidateAuthenticationConfig(t *testing.T) {
 		{name: "insecure issuer", mutate: func(c *AuthenticationConfig) { c.JWTProviders[0].Issuer = "http://issuer.example" }},
 		{name: "no audiences", mutate: func(c *AuthenticationConfig) { c.JWTProviders[0].Audiences = nil }},
 		{name: "duplicate provider", mutate: func(c *AuthenticationConfig) { c.JWTProviders = append(c.JWTProviders, c.JWTProviders[0]) }},
+		{name: "empty claim", mutate: func(c *AuthenticationConfig) {
+			c.JWTProviders[0].ClaimValidationRules = []ClaimValidationRule{{RequiredValue: "cli"}}
+		}},
+		{name: "empty required value", mutate: func(c *AuthenticationConfig) {
+			c.JWTProviders[0].ClaimValidationRules = []ClaimValidationRule{{Claim: "azp"}}
+		}},
+		{name: "duplicate claim", mutate: func(c *AuthenticationConfig) {
+			c.JWTProviders[0].ClaimValidationRules = []ClaimValidationRule{{Claim: "azp", RequiredValue: "a"}, {Claim: "azp", RequiredValue: "b"}}
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

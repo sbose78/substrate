@@ -739,6 +739,45 @@ func TestVerifySubstrateClaims(t *testing.T) {
 	}
 }
 
+func TestVerifyRequiredClaims(t *testing.T) {
+	ti := newTestIssuer(t)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ti.addEC(t, "ec-1", "P-256", &key.PublicKey)
+	v := NewVerifier(ti.issuer(), []string{testAudience}, HTTPKeySource(ti.issuer(), ti.server.Client()),
+		WithRequiredClaims(map[string]string{"azp": "cli"}))
+
+	withClaim := func(value any) map[string]any {
+		c := validClaims(ti.issuer())
+		c["azp"] = value
+		return c
+	}
+	for _, tc := range []struct {
+		name   string
+		claims map[string]any
+		ok     bool
+	}{
+		{"required value", withClaim("cli"), true},
+		{"other value", withClaim("web"), false},
+		{"missing", validClaims(ti.issuer()), false},
+		{"null", withClaim(nil), false},
+		{"number", withClaim(1), false},
+		{"array", withClaim([]string{"cli"}), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := v.Verify(context.Background(), mintJWT(t, "ES256", "ec-1", key, tc.claims), time.Now())
+			if tc.ok && err != nil {
+				t.Fatalf("Verify = %v, want nil", err)
+			}
+			if !tc.ok && (err == nil || !strings.Contains(err.Error(), `"azp"`)) {
+				t.Fatalf("err = %v, want it to mention \"azp\"", err)
+			}
+		})
+	}
+}
+
 func TestVerifyIgnoresSubstrateClaimsOnBadSignature(t *testing.T) {
 	// A malformed Substrate claim on a token with a bad signature must fail on
 	// the signature, proving the claim is not parsed before verification.

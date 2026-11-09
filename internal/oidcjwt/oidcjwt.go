@@ -28,6 +28,7 @@ import (
 	"hash"
 	"io"
 	"log/slog"
+	"maps"
 	"math/big"
 	"net/http"
 	"slices"
@@ -181,6 +182,8 @@ type Verifier struct {
 	source    KeySource
 	// substrate says whether Verify decodes Substrate's claims.
 	substrate bool
+	// required maps claims a token must carry to their exact string values.
+	required map[string]string
 
 	mu                    sync.RWMutex
 	keys                  []*KeyAndID
@@ -200,6 +203,12 @@ type Option func(*Verifier)
 // one. It is for the verifier of the actor-id JWT issuer, whose tokens are the
 // only ones those claims mean anything on.
 func WithSubstrateClaims() Option { return func(v *Verifier) { v.substrate = true } }
+
+// WithRequiredClaims makes Verify refuse a token unless each claim in required
+// is a string with exactly the given value.
+func WithRequiredClaims(required map[string]string) Option {
+	return func(v *Verifier) { v.required = maps.Clone(required) }
+}
 
 // NewVerifier returns a verifier for issuer. A token is accepted when at least
 // one of its audiences matches audiences.
@@ -334,6 +343,10 @@ func (v *Verifier) Verify(ctx context.Context, jwt string, now time.Time) (*Clai
 		return nil, fmt.Errorf("jwt claims to have been issued in the future")
 	}
 
+	if err := checkRequiredClaims(payloadBytes, v.required); err != nil {
+		return nil, err
+	}
+
 	var substrate SubstrateClaims
 	if v.substrate {
 		if substrate, err = decodeSubstrateClaims(rawClaims); err != nil {
@@ -363,6 +376,24 @@ func (v *Verifier) Verify(ctx context.Context, jwt string, now time.Time) (*Clai
 			WarnAfter:          time.Unix(int64(rawClaims.BoundClaims.WarnAfter), 0),
 		},
 	}, nil
+}
+
+// checkRequiredClaims checks a verified payload against required.
+func checkRequiredClaims(payload []byte, required map[string]string) error {
+	if len(required) == 0 {
+		return nil
+	}
+	var claims map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return fmt.Errorf("while unmarshaling payload: %w", err)
+	}
+	for name, want := range required {
+		var got *string
+		if raw, ok := claims[name]; !ok || json.Unmarshal(raw, &got) != nil || got == nil || *got != want {
+			return fmt.Errorf("token claim %q does not have the required value", name)
+		}
+	}
+	return nil
 }
 
 // decodeSubstrateClaims parses Substrate's claims from a verified payload and
