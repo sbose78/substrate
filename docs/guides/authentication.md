@@ -365,6 +365,11 @@ jwtProviders:
   `ate-api-server`'s own ServiceAccount token, so set it only for the
   Substrate cluster's own issuer. `ate-api-server` re-reads both files when
   they change.
+- `claimValidationRules` lists claims a provider's tokens must carry, each
+  as a `claim` and the exact string `requiredValue` it must have. A token
+  without the claim, or with another value or type, is refused. Use it when
+  the issuer also issues tokens with your audience to clients you don't
+  trust, for example `{claim: azp, requiredValue: <your client ID>}`.
 - The Google values are what the Google Cloud CLI issues today: issuer
   `https://accounts.google.com`, and the Cloud SDK's shared client ID as the
   audience. They are examples, not built-in defaults; check the claims your

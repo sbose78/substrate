@@ -273,6 +273,18 @@ func TestRouterConfigValidateIngressAuth(t *testing.T) {
 			},
 			wantErr: "is not a valid SPIFFE ID",
 		},
+		{
+			name:   "token authentication accepted",
+			mutate: func(c *routerConfig) { c.IngressAuth.AuthenticationConfigFile = "/etc/ate/authentication.yaml" },
+		},
+		{
+			name: "token authentication on agentgateway rejected",
+			mutate: func(c *routerConfig) {
+				c.AtenetRouter = string(atenetRouterAgentgateway)
+				c.IngressAuth.AuthenticationConfigFile = "/etc/ate/authentication.yaml"
+			},
+			wantErr: "--ingress-authentication-config needs",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

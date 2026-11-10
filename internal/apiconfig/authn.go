@@ -34,6 +34,29 @@ type JWTProviderConfig struct {
 	Audiences                []string `json:"audiences"`
 	CertificateAuthorityFile string   `json:"certificateAuthorityFile,omitempty"`
 	DiscoveryTokenFile       string   `json:"discoveryTokenFile,omitempty"`
+	// ClaimValidationRules are claims a token must carry, each with an exact
+	// string value. They follow Kubernetes structured authentication's
+	// claimValidationRules, with claim and requiredValue only.
+	ClaimValidationRules []ClaimValidationRule `json:"claimValidationRules,omitempty"`
+}
+
+// ClaimValidationRule requires the claim Claim to be the string RequiredValue.
+type ClaimValidationRule struct {
+	Claim         string `json:"claim"`
+	RequiredValue string `json:"requiredValue"`
+}
+
+// RequiredClaims returns the provider's claim validation rules by claim, or
+// nil when it has none.
+func (p JWTProviderConfig) RequiredClaims() map[string]string {
+	if len(p.ClaimValidationRules) == 0 {
+		return nil
+	}
+	m := make(map[string]string, len(p.ClaimValidationRules))
+	for _, r := range p.ClaimValidationRules {
+		m[r.Claim] = r.RequiredValue
+	}
+	return m
 }
 
 // ParseAuthenticationConfig strictly parses and validates authentication configuration YAML or JSON bytes.
@@ -92,6 +115,16 @@ func ValidateAuthenticationConfig(cfg *AuthenticationConfig) error {
 			if audience == "" {
 				return fmt.Errorf("%s.audiences must not contain an empty audience", field)
 			}
+		}
+		claims := make(map[string]bool, len(p.ClaimValidationRules))
+		for j, r := range p.ClaimValidationRules {
+			if r.Claim == "" || r.RequiredValue == "" {
+				return fmt.Errorf("%s.claimValidationRules[%d] needs a claim and a requiredValue", field, j)
+			}
+			if claims[r.Claim] {
+				return fmt.Errorf("duplicate claim validation rule for claim %q in %s", r.Claim, field)
+			}
+			claims[r.Claim] = true
 		}
 	}
 	return nil
