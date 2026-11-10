@@ -1,4 +1,4 @@
-// Copyright 2026 Google LLC
+// Copyright 2026 The Agent Substrate Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -710,6 +710,12 @@ func TestValidateActorTemplate(t *testing.T) {
 		name: "unknown capability",
 		mutate: func(tmpl *ateapi.ActorTemplate) {
 			tmpl.Containers[0].SecurityContext = &ateapi.SecurityContext{Capabilities: &ateapi.Capabilities{Add: []string{"NET_ADIMN"}}}
+		},
+		want: field.ErrorList{field.NotSupported[string](field.NewPath("containers").Index(0).Child("security_context", "capabilities", "add").Index(0), nil, nil)},
+	}, {
+		name: "capability outside the add allowlist",
+		mutate: func(tmpl *ateapi.ActorTemplate) {
+			tmpl.Containers[0].SecurityContext = &ateapi.SecurityContext{Capabilities: &ateapi.Capabilities{Add: []string{"MKNOD"}}}
 		},
 		want: field.ErrorList{field.NotSupported[string](field.NewPath("containers").Index(0).Child("security_context", "capabilities", "add").Index(0), nil, nil)},
 	}, {

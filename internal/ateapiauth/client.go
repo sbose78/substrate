@@ -1,4 +1,4 @@
-//  Copyright 2026 Google LLC
+//  Copyright 2026 The Agent Substrate Authors
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
 //  you may not use this file except in compliance with the License.
@@ -21,10 +21,8 @@ import (
 	"fmt"
 
 	"go.ate.dev/substrate/internal/credbundle"
-	"go.ate.dev/substrate/internal/k8sresolver"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"k8s.io/client-go/kubernetes"
 )
 
 const DefaultServiceAccountCAFile = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
@@ -53,10 +51,6 @@ type ClientConfig struct {
 	// send a bearer token on each RPC. The server prefers a certificate
 	// identity to a token, so a connection cannot carry both.
 	WithoutClientCert bool
-
-	// K8sClient is an optional Kubernetes client. When provided, an EndpointSlice
-	// resolver builder using this client will be attached to DialOptions.
-	K8sClient kubernetes.Interface
 }
 
 // DialOptions returns the grpc.DialOption set described by cfg, suitable to
@@ -103,9 +97,6 @@ func DialOptions(cfg ClientConfig) ([]grpc.DialOption, error) {
 
 	opts := []grpc.DialOption{
 		grpc.WithDefaultServiceConfig(roundRobinServiceConfig),
-	}
-	if cfg.K8sClient != nil {
-		opts = append(opts, grpc.WithResolvers(k8sresolver.NewBuilder(cfg.K8sClient)))
 	}
 
 	if !cfg.WithoutClientCert {

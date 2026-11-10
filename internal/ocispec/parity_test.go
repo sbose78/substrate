@@ -1,4 +1,4 @@
-// Copyright 2026 Google LLC
+// Copyright 2026 The Agent Substrate Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -156,8 +156,8 @@ func TestShapers_PreserveProcess(t *testing.T) {
 	}
 }
 
-// ShapeMicroVM rewrites bind sources to their guest share paths and switches
-// bind to rbind.
+// ShapeMicroVM rewrites bind sources to their guest share paths, switches bind
+// to rbind, and keeps nodev.
 func TestShapeMicroVM_TranslatesSourcesIntoTheShare(t *testing.T) {
 	spec := Build(parityOptions)
 	if err := ShapeMicroVM(spec, MicroVMOptions{ActorDirs: parityActorDirs, ContainerName: "app"}); err != nil {
@@ -168,10 +168,10 @@ func TestShapeMicroVM_TranslatesSourcesIntoTheShare(t *testing.T) {
 		wantSource string
 		wantOpts   []string
 	}{
-		{"/var/data", GuestSharedDir + "/" + ShareDurable + "/data", []string{"rbind", "rw"}},
-		{"/run/ate", GuestSharedDir + "/" + ShareSystemInfo + "/sysinfo", []string{"rbind", "ro"}},
-		{"/mnt/csi", GuestSharedDir + "/" + ShareCSI + "/csi", []string{"rbind", "rw"}},
-		{"/ate", GuestSharedDir + "/c_app/" + ShareVolumes + "/agent", []string{"rbind", "ro"}},
+		{"/var/data", GuestSharedDir + "/" + ShareDurable + "/data", []string{"rbind", "rw", "nodev"}},
+		{"/run/ate", GuestSharedDir + "/" + ShareSystemInfo + "/sysinfo", []string{"rbind", "ro", "nodev"}},
+		{"/mnt/csi", GuestSharedDir + "/" + ShareCSI + "/csi", []string{"rbind", "rw", "nodev"}},
+		{"/ate", GuestSharedDir + "/c_app/" + ShareVolumes + "/agent", []string{"rbind", "ro", "nodev"}},
 	} {
 		m := mountFor(t, spec, tc.dest)
 		if m.Source != tc.wantSource {
@@ -227,6 +227,9 @@ func TestShapeGVisor_Sandbox(t *testing.T) {
 	}
 	if got, want := spec.Annotations["dev.gvisor.spec.mount.data.source"], "/node/actors/a/durable-dir/data"; got != want {
 		t.Errorf("durable-dir mount source annotation = %q, want %q", got, want)
+	}
+	if got, want := spec.Annotations["dev.gvisor.spec.mount.data.options"], "mode=0777"; got != want {
+		t.Errorf("durable-dir mount options annotation = %q, want %q", got, want)
 	}
 }
 

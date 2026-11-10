@@ -1,4 +1,4 @@
-// Copyright 2026 Google LLC
+// Copyright 2026 The Agent Substrate Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -63,6 +63,9 @@ func ShapeGVisor(spec *specs.Spec, o GVisorOptions) {
 			spec.Annotations["dev.gvisor.spec.mount."+v+".type"] = "tmpfs"
 			spec.Annotations["dev.gvisor.spec.mount."+v+".share"] = "container"
 			spec.Annotations["dev.gvisor.spec.mount."+v+".source"] = filepath.Join(o.ActorDirs.GetDurableDirVolumeMountsDir(), v)
+			// A tmpfs root is 01777 by default. Make it 0777, as Kubernetes
+			// creates an emptyDir.
+			spec.Annotations["dev.gvisor.spec.mount."+v+".options"] = "mode=0777"
 		}
 	} else {
 		spec.Annotations["io.kubernetes.cri.container-type"] = "container"
@@ -70,13 +73,14 @@ func ShapeGVisor(spec *specs.Spec, o GVisorOptions) {
 	}
 
 	// runsc replaces /dev and /dev/pts with its own mounts and ignores mqueue
-	// mounts and the nodev and strictatime options, logging a warning for each.
+	// mounts and the strictatime option, logging a warning for each. It keeps
+	// nodev, which it applies to the host bind mount.
 	spec.Mounts = slices.DeleteFunc(spec.Mounts, func(m specs.Mount) bool {
 		return m.Destination == "/dev" || m.Destination == "/dev/pts" || m.Type == "mqueue"
 	})
 	for i := range spec.Mounts {
 		spec.Mounts[i].Options = slices.DeleteFunc(slices.Clone(spec.Mounts[i].Options), func(opt string) bool {
-			return opt == "nodev" || opt == "strictatime"
+			return opt == "strictatime"
 		})
 	}
 	// runsc's tmpfs defaults to half of the node's memory. Cap /tmp at half the

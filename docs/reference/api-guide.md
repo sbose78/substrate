@@ -149,19 +149,20 @@ The `ActorTemplate` defines the code, environment, and state-management policies
 | :--- | :--- | :--- |
 | `containers` | `[]Container` | **Required.** The workload definition — see [Container Fields](#container-fields) below. Each container may also declare an optional `wakeupProbe` HTTP probe — see [Container Wakeup Probe](#container-wakeup-probe-wakeupprobe). |
 | `workerSelector` | `*Selector` | Optional. Gates which `WorkerPool`s actors from this template may use, by matching against each pool's labels (`matchLabels`). If unset, all pools are eligible (subject to the actor's own `worker_selector`). The pool sets the sandbox class, so this is also how a template pins one: if your cluster has pools of more than one sandbox class and the workload needs a particular class, make sure the selector points only at pools of that class. An actor booting with no snapshot and no selector may run on any class, and keeps it from its first checkpoint on. An actor created from the golden snapshot or a `sourceTag` runs on that snapshot's class. See [Sandbox Classes](sandbox-classes.md) for what differs between classes. The pools a template selects must also share a CPU architecture; see `sandboxRuntime` under [Snapshot Storage Layout](#snapshot-storage-layout). |
-| `snapshotConfig` | `SnapshotConfig` | Optional; omitted fields take their defaults. The base object-storage location snapshots are written under (a preview field that requires the `PerTemplateSnapshotLocation` gate), the snapshot fidelity (`preferredFidelity`) every Suspend captures, and automated golden snapshot creation (`goldenSnapshotConfig.mode`). See [Snapshot Storage Layout](#snapshot-storage-layout). |
-| `volumes` | `[]Volume` | Optional. Volumes the containers may mount, each a `durableDir`, an `image` read-only OCI image volume (`image.reference`, pinned by digest), an `external` CSI volume source (preview, behind the `ExternalVolumes` gate; see [CSI Volumes Guide](../guides/csi-volumes.md)), or a `systemInfo` volume (see [SystemInfo Volumes](#systeminfo-volumes)). Every declared volume must be mounted by at least one container. A `durableDir` is created `0777`, as Kubernetes creates an emptyDir, so a container running as any user can write it. A snapshot restores it with the mode it had, so the container's own chmod survives suspend and resume. |
+| `snapshotConfig` | `SnapshotConfig` | Optional; omitted fields take their defaults. The base object-storage location snapshots are written under (`storageLocation`; **Preview**, `PerTemplateSnapshotLocation` gate), the snapshot fidelity (`preferredFidelity`) every Suspend captures, and automated golden snapshot creation (`goldenSnapshotConfig.mode`). See [Snapshot Storage Layout](#snapshot-storage-layout). |
+| `volumes` | `[]Volume` | Optional. Volumes the containers may mount, each a `durableDir`, an `image` read-only OCI image volume (`image.reference`, pinned by digest), an `external` CSI volume source (**Preview**, `ExternalVolumes` gate; see [CSI Volumes Guide](../guides/csi-volumes.md)), or a `systemInfo` volume (see [SystemInfo Volumes](#systeminfo-volumes)). Every declared volume must be mounted by at least one container. A `durableDir` is created `0777`, as Kubernetes creates an emptyDir, so a container running as any user can write it. A snapshot restores it with the mode it had, so the container's own chmod survives suspend and resume. |
 | `resources` | `*ResourceRequirements` | Required. Declares each actor's compute size via `limits`, which must set both `cpuMillicores` and `memoryBytes` — see [Sandbox Right-Sizing](#sandbox-right-sizing-resources). Immutable, like the rest of the template. |
-| `goldenEgressPolicy` | `EgressPolicyTemplate` | **Preview.** Optional egress policy for the golden actor during initialization. Requires at least one rule, using the same rule defaults and validation as `EgressPolicy`. See [Golden Egress Policy](#golden-egress-policy-goldenegresspolicy). |
+| `goldenEgressPolicy` | `EgressPolicyTemplate` | **Preview** (`GoldenEgressPolicy` gate). Optional egress policy for the golden actor during initialization. Requires at least one rule, using the same rule defaults and validation as `EgressPolicy`. See [Golden Egress Policy](#golden-egress-policy-goldenegresspolicy). |
 
 The sandbox runtime and its binaries (e.g. the gVisor `runsc` binary, or a microVM kernel/firmware/config) are configured on the [`WorkerPool`](#1-workerpool-the-physical-capacity) via its `sandboxClasses` and the cluster-scoped [`SandboxConfig`](#3-sandboxconfig-the-sandbox-itself) it resolves, rather than on the `ActorTemplate`. An `ActorTemplate` selects its `WorkerPool`s via `workerSelector` (AND'd with the actor's `worker_selector`). When an actor runs on a worker, the runtime it runs under is stamped onto the actor's assignment and snapshots (`sandboxRuntime`: the sandbox class and the runtime's compatibility version) so subsequent resumes prefer runtime-compatible workers.
 
 ### Golden Egress Policy (`goldenEgressPolicy`)
 
-`goldenEgressPolicy` is a **preview** feature. Enable
-`--preview=GoldenEgressPolicy` on the server (or through
-ate-setup's `preview` setting), and opt in on the client with `kubectl ate --preview`
-or the `Ate-Preview-Allowed: true` gRPC metadata header. See [Preview gates](../dev/preview-gates.md).
+> [!IMPORTANT]
+> `goldenEgressPolicy` is a **preview** feature. Enable
+> `--preview=GoldenEgressPolicy` on the server (or through
+> ate-setup's `preview` setting), and opt in on the client with `kubectl ate --preview`
+> or the `Ate-Preview-Allowed: true` gRPC metadata header. See [Preview gates](../dev/preview-gates.md).
 
 Set `goldenEgressPolicy` on an ActorTemplate to give its golden actor network
 access during initialization. For example, this template field
@@ -358,7 +359,7 @@ A container running as root has that set as its effective capabilities. A contai
 
 | Field | Type | Description |
 | :--- | :--- | :--- |
-| `securityContext.capabilities.add` | `[]string` | Optional. Capabilities to grant on top of the default set. `ALL` is **not** accepted here. |
+| `securityContext.capabilities.add` | `[]string` | Optional. Capabilities to grant on top of the default set. Only the allowed capabilities listed below are accepted. |
 | `securityContext.capabilities.drop` | `[]string` | Optional. Capabilities to remove from the default set. `ALL` drops the whole set. |
 
 - **Naming.** Capabilities are named **without** the `CAP_` prefix, as in Kubernetes — `NET_BIND_SERVICE`, not `CAP_NET_BIND_SERVICE`. The prefixed spelling is rejected at admission rather than silently granting nothing. Unknown names are rejected too, in `drop` as well as `add`, so a typo in `drop` can't leave the capability granted.
@@ -372,12 +373,12 @@ A container running as root has that set as its effective capabilities. A contai
       add: ["NET_BIND_SERVICE"]
   ```
 
-- **`ALL` in `add` is rejected.** Kubernetes accepts it in the API and relies on PodSecurity admission to deny it; Substrate has no equivalent policy layer yet, so it is refused at admission instead. Name the capabilities the container needs.
+- **Allowed capabilities.** `add` accepts only `AUDIT_WRITE`, `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `FSETID`, `KILL`, `NET_BIND_SERVICE`, `SETFCAP`, `SETGID`, `SETPCAP`, `SETUID` and `SYS_CHROOT`. Any other name, including `ALL`, `DAC_READ_SEARCH`, `MKNOD`, `NET_RAW`, `SYS_ADMIN` and `SYS_PTRACE`, is rejected at admission. These capabilities act on the microVM guest kernel and its devices, not just on the container. `drop` accepts any capability name.
 - **Ambient capabilities are not supported** ([gvisor#3166](https://github.com/google/gvisor/issues/3166)).
 - **Low ports.** A container may bind a port below 1024 without `NET_BIND_SERVICE` on both runtimes: gVisor's network stack has no privileged-port limit, and the microVM guest sets `net.ipv4.ip_unprivileged_port_start=0` to match.
-- **`NET_RAW`.** gVisor removes it even when `add` lists it, and microVM grants it. See [Capabilities (`NET_RAW`)](sandbox-classes.md#capabilities-net_raw).
+- **`ping` without `NET_RAW`.** `NET_RAW` can't be added. Both runtimes let any user open ICMP echo sockets, which is what `ping` uses: gVisor's network stack allows them, and the microVM guest sets `net.ipv4.ping_group_range=0 2147483647` to match.
 - **Setuid binaries work.** Neither runtime sets `no_new_privileges`, as for a Kubernetes container with `allowPrivilegeEscalation: true`; gVisor runs with `--allow-suid`.
-- **Image files owned by other users.** Image files keep the owner their image's layers record, as under containerd. A container running as its image's `USER` can use what the image gave that user, for example after `RUN chown -R app:app /app` and `USER app`. A container running as root, because its image sets no `USER` or `USER root`, has no `DAC_OVERRIDE` or `DAC_READ_SEARCH` by default. On a file or directory another user owns, it gets only what the permission bits grant to others. Add `DAC_OVERRIDE` if it writes to such files, or `DAC_READ_SEARCH` if it only reads them.
+- **Image files owned by other users.** Image files keep the owner their image's layers record, as under containerd. A container running as its image's `USER` can use what the image gave that user, for example after `RUN chown -R app:app /app` and `USER app`. A container running as root, because its image sets no `USER` or `USER root`, has no `DAC_OVERRIDE` by default. On a file or directory another user owns, it gets only what the permission bits grant to others. Add `DAC_OVERRIDE` if it reads or writes such files.
 
 The sandbox — gVisor or microVM — remains the isolation boundary; capabilities constrain the workload *inside* it.
 
@@ -462,7 +463,7 @@ resources:
 <location>/atespaces/<atespace>/tags/<tag uid>
 ```
 
-> [!NOTE]
+> [!IMPORTANT]
 > Snapshots are stored under ate-api-server's cluster-wide `--snapshot-location`. `snapshotConfig.storageLocation` is an optional preview field: with the `PerTemplateSnapshotLocation` preview gate (`--preview=PerTemplateSnapshotLocation`), a template that sets it stores its snapshots there instead. `<location>` above is whichever of the two applies.
 >
 > Only a client that opts in to preview features (`kubectl ate --preview`, or the `Ate-Preview-Allowed: true` header) may set `storageLocation`, and only with the gate enabled. Otherwise the request fails with `InvalidArgument`. A template stored before the API enforced this keeps the field, and ate-api-server ignores it while the gate is off. `CreateActorTemplate` fails with `FailedPrecondition` when the template leaves it empty and ate-api-server has no `--snapshot-location`.
@@ -623,7 +624,7 @@ metadata:
     sandboxconfig.ate.dev/is-class-default: "true"
 spec:
   sandboxClass: gvisor
-  defaultVersion: v6
+  defaultVersion: v7
   versions:
   - name: v6
     state: Enabled
@@ -636,6 +637,17 @@ spec:
         gvisor:
           url: "gs://gvisor/releases/release/20261026.0/aarch64/gvisor.tar.zstd"
           sha256: "6257e49955f13e6caceb2c4181c5dc5406c460e805940c944e67ad65553f5b02"
+  - name: v7
+    state: Enabled
+    assets:
+      amd64:
+        gvisor:
+          url: "gs://gvisor/releases/release/20261102.0/x86_64/gvisor.tar.zstd"
+          sha256: "a1439ffbba7d212e0fde32ea79fa9bb51cbc4c5f6c16af1f047260290b861d42"
+      arm64:
+        gvisor:
+          url: "gs://gvisor/releases/release/20261102.0/aarch64/gvisor.tar.zstd"
+          sha256: "f702ae92ad7a0c4134be34ca23f52966dbb696db0c0f5b8ec439210ab2cd7c6a"
 ```
 
 ### MicroVM SandboxConfig

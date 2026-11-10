@@ -1,4 +1,4 @@
-// Copyright 2026 Google LLC
+// Copyright 2026 The Agent Substrate Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -194,6 +194,41 @@ func TestShapeMicroVM_AllowsLowPortsInTheGuest(t *testing.T) {
 	}
 	if v := preset.Linux.Sysctl[portStart]; v != "1024" {
 		t.Errorf("%s = %q, want the caller's value kept", portStart, v)
+	}
+}
+
+func TestShapeMicroVM_VolumesAreNodev(t *testing.T) {
+	spec := Build(parityOptions)
+	if err := ShapeMicroVM(spec, MicroVMOptions{ActorDirs: parityActorDirs, ContainerName: "app"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, dest := range parityMountPaths {
+		i := slices.IndexFunc(spec.Mounts, func(m specs.Mount) bool { return m.Destination == dest })
+		if i < 0 {
+			t.Fatalf("no mount at %s", dest)
+		}
+		opts := spec.Mounts[i].Options
+		for _, want := range []string{"rbind", "nodev"} {
+			if !slices.Contains(opts, want) {
+				t.Errorf("%s options = %v, want %s", dest, opts, want)
+			}
+		}
+		// Setuid binaries and file capabilities on volumes work, as under
+		// containerd and gVisor.
+		if slices.Contains(opts, "nosuid") {
+			t.Errorf("%s options = %v, want no nosuid", dest, opts)
+		}
+	}
+}
+
+func TestShapeMicroVM_AllowsPingWithoutNetRaw(t *testing.T) {
+	const key = "net.ipv4.ping_group_range"
+	spec := Build(Options{Container: &ateworkerpb.Container{ContainerSpec: &ateworkerpb.ContainerSpec{Args: []string{"/app"}}}})
+	if err := ShapeMicroVM(spec, MicroVMOptions{ActorDirs: parityActorDirs, ContainerName: "app"}); err != nil {
+		t.Fatal(err)
+	}
+	if v := spec.Linux.Sysctl[key]; v != "0 2147483647" {
+		t.Errorf("%s = %q, want \"0 2147483647\"", key, v)
 	}
 }
 

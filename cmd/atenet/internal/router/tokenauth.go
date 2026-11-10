@@ -1,4 +1,4 @@
-// Copyright 2026 Google LLC
+// Copyright 2026 The Agent Substrate Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@ import (
 	"go.ate.dev/substrate/cmd/atenet/internal/router/ingress"
 	"go.ate.dev/substrate/internal/apiconfig"
 	"go.ate.dev/substrate/internal/ateapiauth"
+	"go.ate.dev/substrate/internal/k8sresolver"
 	"go.ate.dev/substrate/internal/oidcjwt"
 )
 
@@ -46,13 +47,15 @@ func (s *RouterServer) newIngressTokenAuth(ctx context.Context) (*ingress.TokenA
 	}
 
 	dialOpts, err := ateapiauth.DialOptions(ateapiauth.ClientConfig{
-		K8sClient:         s.clientset,
 		CAFile:            s.cfg.Auth.AteapiCAFile,
 		ServerName:        s.cfg.Auth.AteapiServerName,
 		WithoutClientCert: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("building ateapi dial options for token callers: %w", err)
+	}
+	if s.clientset != nil {
+		dialOpts = append(dialOpts, grpc.WithResolvers(k8sresolver.NewBuilder(s.clientset)))
 	}
 	dialOpts = append(dialOpts, grpc.WithStatsHandler(otelgrpc.NewClientHandler()))
 	conn, err := grpc.NewClient(s.cfg.AteapiAddr, dialOpts...)

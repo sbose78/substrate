@@ -1,4 +1,4 @@
-// Copyright 2026 Google LLC
+// Copyright 2026 The Agent Substrate Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -164,12 +164,13 @@ func Build(o Options) *specs.Spec {
 	// Mount order across volume kinds does not matter: the API rejects mounts
 	// that nest under one another. A volume at a system mount path, such as
 	// /tmp, replaces that mount in place.
+	// nodev: the runtime must not honor a device node on a volume.
 	bind := func(dest, src, mode string) {
 		m := specs.Mount{
 			Destination: dest,
 			Type:        "bind",
 			Source:      src,
-			Options:     []string{"bind", mode},
+			Options:     []string{"bind", mode, "nodev"},
 		}
 		if i := slices.IndexFunc(spec.Mounts, func(s specs.Mount) bool { return s.Destination == dest }); i >= 0 {
 			spec.Mounts[i] = m

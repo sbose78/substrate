@@ -1,4 +1,4 @@
-// Copyright 2026 Google LLC
+// Copyright 2026 The Agent Substrate Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -3488,13 +3488,14 @@ func (x *SecurityContext) GetCapabilities() *Capabilities {
 // removes the whole default set.
 type Capabilities struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// add lists capabilities to grant on top of the default set. "ALL" is
-	// rejected: name the individual capabilities the container needs.
+	// add lists capabilities to grant on top of the default set. Only
+	// AUDIT_WRITE, CHOWN, DAC_OVERRIDE, FOWNER, FSETID, KILL, NET_BIND_SERVICE,
+	// SETFCAP, SETGID, SETPCAP, SETUID and SYS_CHROOT are accepted.
 	//
 	// +k8s:optional
 	// +k8s:maxItems=64
 	// +k8s:listType=set
-	// +k8s:customValidation # a Linux capability name; "ALL" not accepted
+	// +k8s:customValidation # one of resources.AllowedAddCapabilities
 	Add []string `protobuf:"bytes,1,rep,name=add,proto3" json:"add,omitempty"`
 	// drop lists capabilities to remove from the default set. "ALL" drops the
 	// whole set, so drop+add expresses an exact set rather than a relative one.

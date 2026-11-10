@@ -1,6 +1,6 @@
 //go:build linux
 
-// Copyright 2026 Google LLC
+// Copyright 2026 The Agent Substrate Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -431,9 +431,12 @@ type CreateSandboxOpts struct {
 // volumes every container runs on). Mirrors kata startSandbox.
 func (a *AgentClient) CreateSandboxForActor(ctx context.Context, opts CreateSandboxOpts) error {
 	storages := []*agentpb.Storage{{
-		Driver:     virtioFSDriver,
-		Source:     FsTag,
-		Fstype:     typeVirtioFS,
+		Driver: virtioFSDriver,
+		Source: FsTag,
+		Fstype: typeVirtioFS,
+		// nodev on the share itself also covers its automounted submounts,
+		// which a nodev remount of each container bind does not reach.
+		Options:    []string{"nodev"},
 		MountPoint: guestSharedDir,
 	}}
 	return a.CreateSandbox(ctx, &agentpb.CreateSandboxRequest{
