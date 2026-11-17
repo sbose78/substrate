@@ -17,10 +17,11 @@
 // through the control plane (parking the request while the worker pool is
 // saturated), and points the dataplane at the worker that ends up hosting it.
 //
-// Everything reaching this handler is unauthenticated client input. The
-// opposite trust model — an actor identity carried by a CA-signed client
-// certificate — belongs to the sibling egress package, and the two are kept
-// apart deliberately.
+// Everything reaching this handler is client input. The listeners authenticate
+// clients by certificate. With TokenAuth, the handler authenticates the rest by
+// bearer token. The opposite trust model — an actor identity carried by a
+// CA-signed client certificate — belongs to the sibling egress package, and
+// the two are kept apart deliberately.
 package ingress
 
 import (
@@ -62,14 +63,20 @@ const (
 type Handler struct {
 	resumer *ActorResumer
 	parking *parkingLot
+	// tokenAuth is nil when every client presents a certificate.
+	tokenAuth *TokenAuth
 }
 
-func New(apiClient ateapi.ControlClient, parkCfg ParkedRequestConfig, parkMetrics *ParkingMetrics) *Handler {
+func New(apiClient ateapi.ControlClient, parkCfg ParkedRequestConfig, parkMetrics *ParkingMetrics, opts ...Option) *Handler {
 	lot := newParkingLot(parkCfg, parkMetrics)
-	return &Handler{
+	h := &Handler{
 		resumer: NewActorResumer(apiClient, withParking(parkCfg), withParkingLot(lot)),
 		parking: lot,
 	}
+	for _, o := range opts {
+		o(h)
+	}
+	return h
 }
 
 func (h *Handler) Direction() extproc.Direction { return extproc.DirectionIngress }
@@ -88,9 +95,24 @@ func (h *Handler) HandleRequestHeaders(ctx context.Context, md *extproc.RequestM
 	ctx, span := otel.Tracer(serviceName).Start(ctx, "ExtProc.RequestHeaders")
 	defer span.End()
 
+	var token string
+	var removeAuthorization bool
+	if h.tokenAuth != nil {
+		var err error
+		if token, removeAuthorization, err = h.tokenAuth.authenticate(ctx, md); err != nil {
+			return extproc.Result{}, err
+		}
+	}
+
 	actorRef, err := atenet.ParseTargetActor(routingValue(md, atenet.TargetActorHeader, extproc.TargetActorFilterStateAttribute))
 	if err != nil {
 		return extproc.Result{}, extproc.NewReqError(envoy_type.StatusCode_NotFound, "invalid actor reference")
+	}
+
+	if token != "" {
+		if err := h.tokenAuth.authorize(ctx, actorRef, token); err != nil {
+			return extproc.Result{}, err
+		}
 	}
 
 	// CONNECT traffic can name a port other than defaultActorPort. After Envoy
@@ -171,6 +193,9 @@ func (h *Handler) HandleRequestHeaders(ctx context.Context, md *extproc.RequestM
 		},
 		AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
 	})
+	if removeAuthorization {
+		mutation.RemoveHeaders = append(mutation.RemoveHeaders, authorizationHeader)
+	}
 
 	res.Target = targetAddr
 	res.Response = &extprocv3.HeadersResponse{

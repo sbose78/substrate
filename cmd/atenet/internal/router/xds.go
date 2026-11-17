@@ -258,6 +258,8 @@ type XdsServer struct {
 	// one of downstreamAllowedSPIFFEIDs as a URI SAN.
 	downstreamClientCAPath     string
 	downstreamAllowedSPIFFEIDs []string
+	// tokenAuth: see SetIngressTokenAuth.
+	tokenAuth bool
 
 	otlpHost string
 	otlpPort uint32
@@ -394,6 +396,19 @@ func (x *XdsServer) SetDownstreamClientAuth(caPath string, allowedSPIFFEIDs []st
 	x.downstreamAllowedSPIFFEIDs = allowedSPIFFEIDs
 }
 
+// SetIngressTokenAuth makes the client certificate optional on the TLS ingress
+// listeners. Envoy still checks that a certificate the client presents chains
+// to the client CA, but drops the SAN matchers: its default validator refuses
+// a client without a certificate whenever any are set. The listeners record
+// the verified URI SAN and, on CONNECT, the outer request's Authorization
+// header in filter state. ext_proc then checks the SAN against the allowlist
+// and requires a bearer token from any other client.
+func (x *XdsServer) SetIngressTokenAuth(enabled bool) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	x.tokenAuth = enabled
+}
+
 // otlpDefaultPort is the OTLP/gRPC default port, used when the collector
 // endpoint names no port.
 const otlpDefaultPort = "4317"
@@ -520,9 +535,11 @@ func (x *XdsServer) UpdateSnapshot() error {
 	x.mu.Lock()
 	defer x.mu.Unlock()
 
-	// Without an allowlist no client may reach actors, so the TLS listeners
-	// are not served. Envoy skips the SAN check when there are no matchers.
-	clientsAllowed := len(x.downstreamAllowedSPIFFEIDs) > 0
+	// Without an allowlist or token authentication no client may reach
+	// actors, so the TLS listeners are not served. Envoy skips the SAN check
+	// when there are no matchers. With token authentication ext_proc checks
+	// the SAN instead.
+	clientsAllowed := len(x.downstreamAllowedSPIFFEIDs) > 0 || x.tokenAuth
 	httpsEnabled := x.httpsPort > 0 && x.certPath != "" && clientsAllowed
 	// The main_internal cluster and listener only exist to serve the CONNECT
 	// listener.
@@ -1180,19 +1197,32 @@ func setFilterStateHTTPFilter(values ...*setfilterstatecommonv3.FilterStateValue
 // actorRoutingFilterStateFilter captures the actor routing header so
 // main_internal can read it across the CONNECT internal-listener hop. With
 // captureAuthority it also captures the authority, and pools the hop by both.
-func actorRoutingFilterStateFilter(captureAuthority bool) *hcmv3.HttpFilter {
+// With tokenAuth it also captures the client's verified URI SAN and, on
+// CONNECT, its Authorization header, and pools the hop by those too, so a
+// connection never carries one caller's credentials into another's tunnel.
+func actorRoutingFilterStateFilter(captureAuthority, tokenAuth bool) *hcmv3.HttpFilter {
 	once := setfilterstatecommonv3.FilterStateValue_ONCE
 	actor := "%CEL(request.headers['" + atenet.TargetActorHeader + "'])%"
+	peer := "%DOWNSTREAM_PEER_URI_SAN%"
+	authorization := "%REQ(authorization)%"
 	values := []*setfilterstatecommonv3.FilterStateValue{
 		filterStateValue(extproc.TargetActorFilterStateKey, "envoy.string", actor, once),
 	}
+	if tokenAuth {
+		values = append(values, filterStateValue(extproc.IngressPeerFilterStateKey, "envoy.string", peer, once))
+	}
 	if captureAuthority {
 		authority := "%REQ(" + extproc.AuthorityHeader + ")%"
+		// ParseTargetActor only accepts atespace/name labels, so the actor
+		// never contains "|" and the first "|" splits the key unambiguously.
+		pool := actor + "|" + authority
+		if tokenAuth {
+			values = append(values, filterStateValue(extproc.IngressAuthorizationFilterStateKey, "envoy.string", authorization, once))
+			pool += "|" + peer + "|" + authorization
+		}
 		values = append(values,
 			filterStateValue(extproc.ConnectAuthorityFilterStateKey, "envoy.string", authority, once),
-			// ParseTargetActor only accepts atespace/name labels, so the actor
-			// never contains "|" and the first "|" splits the key unambiguously.
-			filterStateValue(connectPoolFilterStateKey, "envoy.hashable_string", actor+"|"+authority, once))
+			filterStateValue(connectPoolFilterStateKey, "envoy.hashable_string", pool, once))
 	}
 	return setFilterStateHTTPFilter(values...)
 }
@@ -1308,7 +1338,7 @@ func (x *XdsServer) buildConnectTerminateHCM(statPrefix string) *anypb.Any {
 		},
 		CodecType: hcmv3.HttpConnectionManager_AUTO,
 		HttpFilters: []*hcmv3.HttpFilter{
-			actorRoutingFilterStateFilter(true),
+			actorRoutingFilterStateFilter(true, x.tokenAuth),
 			{
 				Name: "envoy.filters.http.router",
 				ConfigType: &hcmv3.HttpFilter_TypedConfig{
@@ -1366,6 +1396,15 @@ func buildConnectRoutes() *routev3.RouteConfiguration {
 // main_internal listeners. captureActorRouting preserves
 // the actor routing header across CONNECT re-entry.
 func (x *XdsServer) buildHcm(statPrefix string, captureActorRouting bool) *anypb.Any {
+	requestAttributes := []string{
+		extproc.TargetActorFilterStateAttribute,
+		extproc.ConnectAuthorityFilterStateAttribute,
+	}
+	if x.tokenAuth {
+		requestAttributes = append(requestAttributes,
+			extproc.IngressPeerFilterStateAttribute,
+			extproc.IngressAuthorizationFilterStateAttribute)
+	}
 	extProcConfig := newAny(&extprocv3filter.ExternalProcessor{
 		GrpcService: &corev3.GrpcService{
 			TargetSpecifier: &corev3.GrpcService_EnvoyGrpc_{
@@ -1390,10 +1429,7 @@ func (x *XdsServer) buildHcm(statPrefix string, captureActorRouting bool) *anypb
 			RequestTrailerMode:  extprocv3filter.ProcessingMode_SKIP,
 			ResponseTrailerMode: extprocv3filter.ProcessingMode_SKIP,
 		},
-		RequestAttributes: []string{
-			extproc.TargetActorFilterStateAttribute,
-			extproc.ConnectAuthorityFilterStateAttribute,
-		},
+		RequestAttributes: requestAttributes,
 		MetadataOptions: &extprocv3filter.MetadataOptions{
 			ForwardingNamespaces: &extprocv3filter.MetadataOptions_MetadataNamespaces{
 				Untyped: []string{ingress.OriginalDstMetadataKey},
@@ -1408,7 +1444,7 @@ func (x *XdsServer) buildHcm(statPrefix string, captureActorRouting bool) *anypb
 
 	httpFilters := []*hcmv3.HttpFilter{}
 	if captureActorRouting {
-		httpFilters = append(httpFilters, actorRoutingFilterStateFilter(false))
+		httpFilters = append(httpFilters, actorRoutingFilterStateFilter(false, x.tokenAuth))
 	}
 	httpFilters = append(httpFilters, &hcmv3.HttpFilter{
 		Name: httpExtProcFilterName,
@@ -1515,22 +1551,27 @@ func dualStackAdditionalAddresses(port int) []*listenerv3.AdditionalAddress {
 // advertises nothing, leaving clients on HTTP/1.1.
 //
 // The socket requires a client certificate that chains to the CA bundle and
-// carries one of the allowed SPIFFE IDs (see SetDownstreamClientAuth). As on
+// carries one of the allowed SPIFFE IDs (see SetDownstreamClientAuth). With
+// token authentication the certificate is optional and the socket checks only
+// the CA; see SetIngressTokenAuth. As on
 // the upstream side, the CA bundle arrives over SDS so it tracks
 // ClusterTrustBundle rotation, while the SPIFFE ID matchers stay inline in
 // the default context.
 func (x *XdsServer) buildDownstreamTlsTransportSocket(alpnProtocols []string) *corev3.TransportSocket {
-	sanMatchers := make([]*tlsv3.SubjectAltNameMatcher, 0, len(x.downstreamAllowedSPIFFEIDs))
-	for _, id := range x.downstreamAllowedSPIFFEIDs {
-		sanMatchers = append(sanMatchers, &tlsv3.SubjectAltNameMatcher{
-			SanType: tlsv3.SubjectAltNameMatcher_URI,
-			Matcher: &matcherv3.StringMatcher{
-				MatchPattern: &matcherv3.StringMatcher_Exact{Exact: id},
-			},
-		})
+	var sanMatchers []*tlsv3.SubjectAltNameMatcher
+	if !x.tokenAuth {
+		sanMatchers = make([]*tlsv3.SubjectAltNameMatcher, 0, len(x.downstreamAllowedSPIFFEIDs))
+		for _, id := range x.downstreamAllowedSPIFFEIDs {
+			sanMatchers = append(sanMatchers, &tlsv3.SubjectAltNameMatcher{
+				SanType: tlsv3.SubjectAltNameMatcher_URI,
+				Matcher: &matcherv3.StringMatcher{
+					MatchPattern: &matcherv3.StringMatcher_Exact{Exact: id},
+				},
+			})
+		}
 	}
 	tlsConfig := &tlsv3.DownstreamTlsContext{
-		RequireClientCertificate: wrapperspb.Bool(true),
+		RequireClientCertificate: wrapperspb.Bool(!x.tokenAuth),
 		CommonTlsContext: &tlsv3.CommonTlsContext{
 			AlpnProtocols: alpnProtocols,
 			TlsCertificateSdsSecretConfigs: []*tlsv3.SdsSecretConfig{

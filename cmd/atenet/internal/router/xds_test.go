@@ -42,6 +42,7 @@ import (
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	streamaccesslogv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/stream/v3"
 	setfilterstatecommonv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/common/set_filter_state/v3"
+	extprocv3filter "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
 	setfilterstatev3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/set_filter_state/v3"
 	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
@@ -60,6 +61,7 @@ func TestActorRoutingFilterStateFilter(t *testing.T) {
 	for _, tc := range []struct {
 		name             string
 		captureAuthority bool
+		tokenAuth        bool
 		want             map[string]string
 	}{
 		{
@@ -77,9 +79,29 @@ func TestActorRoutingFilterStateFilter(t *testing.T) {
 				connectPoolFilterStateKey:              "%CEL(request.headers['ate-target-actor'])%|%REQ(:authority)%",
 			},
 		},
+		{
+			name:      "ordinary ingress with token authentication",
+			tokenAuth: true,
+			want: map[string]string{
+				extproc.TargetActorFilterStateKey: "%CEL(request.headers['ate-target-actor'])%",
+				extproc.IngressPeerFilterStateKey: "%DOWNSTREAM_PEER_URI_SAN%",
+			},
+		},
+		{
+			name:             "CONNECT termination with token authentication",
+			captureAuthority: true,
+			tokenAuth:        true,
+			want: map[string]string{
+				extproc.TargetActorFilterStateKey:          "%CEL(request.headers['ate-target-actor'])%",
+				extproc.ConnectAuthorityFilterStateKey:     "%REQ(:authority)%",
+				extproc.IngressPeerFilterStateKey:          "%DOWNSTREAM_PEER_URI_SAN%",
+				extproc.IngressAuthorizationFilterStateKey: "%REQ(authorization)%",
+				connectPoolFilterStateKey:                  "%CEL(request.headers['ate-target-actor'])%|%REQ(:authority)%|%DOWNSTREAM_PEER_URI_SAN%|%REQ(authorization)%",
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			filter := actorRoutingFilterStateFilter(tc.captureAuthority)
+			filter := actorRoutingFilterStateFilter(tc.captureAuthority, tc.tokenAuth)
 			config := &setfilterstatev3.Config{}
 			if err := filter.GetTypedConfig().UnmarshalTo(config); err != nil {
 				t.Fatalf("unmarshal set_filter_state config: %v", err)
@@ -1740,6 +1762,90 @@ func TestXdsServer_UpdateSnapshot_DownstreamClientAuth(t *testing.T) {
 	if got := validation.GetWatchedDirectory().GetPath(); got != bundleDir {
 		t.Errorf("Expected client CA watched directory '%s', got '%s'", bundleDir, got)
 	}
+}
+
+// TestXdsServer_UpdateSnapshot_IngressTokenAuth checks that token
+// authentication makes the client certificate optional, keeps the CA check,
+// drops the SAN matchers, and gives ext_proc the verified SAN and the CONNECT
+// token. With it off, the listeners keep requiring a certificate with an
+// allowed SAN and send neither.
+func TestXdsServer_UpdateSnapshot_IngressTokenAuth(t *testing.T) {
+	tokenAttributes := []string{extproc.IngressPeerFilterStateAttribute, extproc.IngressAuthorizationFilterStateAttribute}
+	for _, tc := range []struct {
+		name      string
+		tokenAuth bool
+		allowed   []string
+	}{
+		{name: "off", allowed: []string{"spiffe://cluster.local/ns/demo/sa/client"}},
+		{name: "on", tokenAuth: true, allowed: []string{"spiffe://cluster.local/ns/demo/sa/client"}},
+		{name: "on without allowlist", tokenAuth: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := NewXdsServer(18000)
+			server.SetConfig(50053, "127.0.0.1")
+			server.SetConnectTLSPort(8444)
+			server.SetTlsConfig(8443, "/run/servicedns.podcert.ate.dev/credential-bundle.pem")
+			server.SetDownstreamClientAuth("/run/podidentity.podcert.ate.dev/trust-bundle.pem", tc.allowed)
+			server.SetIngressTokenAuth(tc.tokenAuth)
+			listeners := snapshotListeners(t, server)
+
+			for _, name := range []string{IngressHTTPSListener, "connect_terminate_tls"} {
+				l, exists := listeners[name]
+				if !exists {
+					t.Fatalf("TLS listener '%s' is missing from snapshot listeners", name)
+				}
+				dtc := downstreamTlsContext(t, l)
+				if got, want := dtc.GetRequireClientCertificate().GetValue(), !tc.tokenAuth; got != want {
+					t.Errorf("Listener '%s': require_client_certificate = %v, want %v", name, got, want)
+				}
+				combined := dtc.GetCommonTlsContext().GetCombinedValidationContext()
+				if got := combined.GetValidationContextSdsSecretConfig().GetName(); got != IngressClientTrustSecretName {
+					t.Errorf("Listener '%s': validation SDS secret = '%s', want '%s'", name, got, IngressClientTrustSecretName)
+				}
+				// Envoy refuses a client without a certificate whenever any SAN
+				// matcher is set, so token authentication checks the SAN in
+				// ext_proc instead.
+				wantMatchers := len(tc.allowed)
+				if tc.tokenAuth {
+					wantMatchers = 0
+				}
+				if got := len(combined.GetDefaultValidationContext().GetMatchTypedSubjectAltNames()); got != wantMatchers {
+					t.Errorf("Listener '%s': %d SAN matchers, want %d", name, got, wantMatchers)
+				}
+			}
+
+			for _, name := range []string{IngressHTTPSListener, MainInternalName} {
+				attrs := extProcRequestAttributes(t, listeners[name])
+				for _, attr := range tokenAttributes {
+					if got := slices.Contains(attrs, attr); got != tc.tokenAuth {
+						t.Errorf("Listener '%s': ext_proc requests %s = %v, want %v", name, attr, got, tc.tokenAuth)
+					}
+				}
+			}
+		})
+	}
+}
+
+// extProcRequestAttributes returns the request_attributes of the ext_proc
+// filter in a listener's HCM.
+func extProcRequestAttributes(t *testing.T, l *listenerv3.Listener) []string {
+	t.Helper()
+	hcm := &hcmv3.HttpConnectionManager{}
+	if err := l.GetFilterChains()[0].GetFilters()[0].GetTypedConfig().UnmarshalTo(hcm); err != nil {
+		t.Fatalf("Listener '%s': unmarshal HCM: %v", l.GetName(), err)
+	}
+	for _, f := range hcm.GetHttpFilters() {
+		if f.GetName() != httpExtProcFilterName {
+			continue
+		}
+		cfg := &extprocv3filter.ExternalProcessor{}
+		if err := f.GetTypedConfig().UnmarshalTo(cfg); err != nil {
+			t.Fatalf("Listener '%s': unmarshal ext_proc: %v", l.GetName(), err)
+		}
+		return cfg.GetRequestAttributes()
+	}
+	t.Fatalf("Listener '%s' has no ext_proc filter", l.GetName())
+	return nil
 }
 
 // A TLS listener without client authentication would let any client reach any

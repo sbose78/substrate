@@ -65,9 +65,11 @@ func (m Mode) ServesIngress() bool { return m == ModeIngress }
 func (m Mode) ServesEgress() bool { return m == ModeEgress }
 
 // ingressAuthConfig holds the client authentication settings for the ingress
-// dataplane's listeners. Every client must present a certificate that chains
-// to ClientCAFile and carries one of AllowedSPIFFEIDs as a URI SAN. Envoy
-// enforces both during the TLS handshake.
+// dataplane's listeners. A client certificate must chain to ClientCAFile and
+// carry one of AllowedSPIFFEIDs as a URI SAN. Without AuthenticationConfigFile
+// every client must present one, and Envoy checks both during the TLS
+// handshake. With it, Envoy checks only the CA, and ext_proc checks the SAN
+// and requires a bearer token from any client without an allowed one.
 type ingressAuthConfig struct {
 	// ClientCAFile is the PEM bundle of CAs allowed to sign client
 	// certificates. Envoy reads it, so it must be mounted in the Envoy
@@ -79,6 +81,9 @@ type ingressAuthConfig struct {
 	// Entries are complete SPIFFE IDs, like
 	// `spiffe://mytrustdomain.com/foo/bar/baz`.
 	AllowedSPIFFEIDs []string
+	// AuthenticationConfigFile lists the JWT providers trusted for clients
+	// without a certificate. Empty requires a certificate from every client.
+	AuthenticationConfigFile string
 }
 
 // authConfig holds the router's mTLS settings for dialing ateapi.
@@ -340,6 +345,9 @@ func (c routerConfig) validate() error {
 // listeners come from its static configuration, so the router has none to
 // check.
 func (c routerConfig) validateIngressAuth() error {
+	if c.IngressAuth.AuthenticationConfigFile != "" && (!c.Mode.ServesIngress() || c.atenetRouter() != atenetRouterEnvoy) {
+		return fmt.Errorf("--ingress-authentication-config needs --mode=%s and the Envoy dataplane", ModeIngress)
+	}
 	if !c.Mode.ServesIngress() || c.atenetRouter() != atenetRouterEnvoy {
 		return nil
 	}

@@ -43,8 +43,14 @@ type ClientConfig struct {
 	ServerName string
 
 	// ClientCredBundle is a PEM file containing the client certificate chain
-	// and PKCS8 private key presented to the server. Required.
+	// and PKCS8 private key presented to the server. Required unless
+	// WithoutClientCert is set.
 	ClientCredBundle string
+
+	// WithoutClientCert dials without a client certificate, for callers that
+	// send a bearer token on each RPC. The server prefers a certificate
+	// identity to a token, so a connection cannot carry both.
+	WithoutClientCert bool
 }
 
 // DialOptions returns the grpc.DialOption set described by cfg, suitable to
@@ -53,7 +59,10 @@ func DialOptions(cfg ClientConfig) ([]grpc.DialOption, error) {
 	if cfg.CAFile == "" {
 		return nil, fmt.Errorf("ateapiauth: CAFile is required")
 	}
-	if cfg.ClientCredBundle == "" {
+	if cfg.WithoutClientCert && cfg.ClientCredBundle != "" {
+		return nil, fmt.Errorf("ateapiauth: WithoutClientCert conflicts with a client credential bundle")
+	}
+	if !cfg.WithoutClientCert && cfg.ClientCredBundle == "" {
 		return nil, fmt.Errorf("ateapiauth: a client credential bundle (mTLS) is required")
 	}
 	loadRootCAs := credbundle.PoolLoader(cfg.CAFile)
@@ -90,7 +99,9 @@ func DialOptions(cfg ClientConfig) ([]grpc.DialOption, error) {
 		grpc.WithDefaultServiceConfig(roundRobinServiceConfig),
 	}
 
-	tlsCfg.GetClientCertificate = credbundle.ClientLoader(cfg.ClientCredBundle)
+	if !cfg.WithoutClientCert {
+		tlsCfg.GetClientCertificate = credbundle.ClientLoader(cfg.ClientCredBundle)
+	}
 	opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)))
 	return opts, nil
 }

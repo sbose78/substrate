@@ -41,6 +41,20 @@ const (
 	TargetActorFilterStateAttribute      = "filter_state['" + TargetActorFilterStateKey + "']"
 	ConnectAuthorityFilterStateAttribute = "filter_state['" + ConnectAuthorityFilterStateKey + "']"
 
+	// IngressPeerFilterStateKey holds the URI SAN of the client certificate
+	// the ingress listener verified, or "-" without one. It crosses the
+	// CONNECT hop like TargetActorFilterStateKey. Only set with token
+	// authentication on.
+	IngressPeerFilterStateKey = "dev.ate.ingress.peer"
+	// IngressAuthorizationFilterStateKey holds the outer CONNECT request's
+	// Authorization header, so ext_proc reads the caller's token from the
+	// CONNECT and never from a tunneled request. Only set with token
+	// authentication on.
+	IngressAuthorizationFilterStateKey = "dev.ate.ingress.authorization"
+
+	IngressPeerFilterStateAttribute          = "filter_state['" + IngressPeerFilterStateKey + "']"
+	IngressAuthorizationFilterStateAttribute = "filter_state['" + IngressAuthorizationFilterStateKey + "']"
+
 	// ActorIdentityFilterStateKey holds the actor's SPIFFE ID
 	// (resources.WorkerForActorSPIFFEID), read from the peer certificate's URI SAN.
 	// The outer CONNECT chain sets it from %DOWNSTREAM_PEER_URI_SAN% and
